@@ -309,6 +309,24 @@ static void http_server_handler(int c)
     socket_buffer_init(&sock, c);
     block_socket(sock.fdn.fd);
 
+    /* Enforce the idle timeout during the request phase. Without this, a
+       client that connects but never sends a complete request would tie up
+       this handler forever. Reads that time out are reported as 408 by
+       http_read_request_line and http_read_header. */
+#ifdef WIN32
+    if (o.idletimeout > 0) {
+        DWORD rcvto = o.idletimeout;
+        setsockopt(sock.fdn.fd, SOL_SOCKET, SO_RCVTIMEO, (const char *) &rcvto, sizeof(rcvto));
+    }
+#else
+    if (o.idletimeout > 0) {
+        struct timeval tv;
+        tv.tv_sec = o.idletimeout / 1000;
+        tv.tv_usec = (o.idletimeout % 1000) * 1000;
+        setsockopt(sock.fdn.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+#endif
+
 #if HAVE_OPENSSL
     if (o.ssl) {
         sock.fdn.ssl = new_ssl(sock.fdn.fd);
@@ -796,6 +814,8 @@ static char *http_code2str(int code)
 HTTP/1.0 405 Method Not Allowed\r\n\
 Allow: CONNECT, GET, HEAD, POST\r\n\
 \r\n";
+    case 408:
+        return "HTTP/1.0 408 Request Timeout\r\nConnection: close\r\n\r\n";
     case 413:
         return "HTTP/1.0 413 Request Entity Too Large\r\n\r\n";
     case 501:

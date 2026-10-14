@@ -82,6 +82,26 @@ void socket_buffer_init(struct socket_buffer *buf, int sd)
 
 /* Read from a stateful socket buffer. If there is any data in the buffer it is
    returned, otherwise data is read with recv. Return value is as for recv. */
+/* Set when a buffered read returned early because the idle timeout
+   (SO_RCVTIMEO) expired, as opposed to a genuine error or EOF. Callers can
+   distinguish the two with socket_buffer_read_timedout(). */
+static int sb_read_timedout;
+
+int socket_buffer_read_timedout(void)
+{
+    return sb_read_timedout;
+}
+
+/* Is this fdinfo error just a timed-out (non-blocking) read? */
+static int fdinfo_read_would_block(const struct fdinfo *fdn)
+{
+    return fdn->lasterr == EAGAIN || fdn->lasterr == EWOULDBLOCK
+#ifdef WIN32
+        || fdn->lasterr == WSAEWOULDBLOCK
+#endif
+        ;
+}
+
 int socket_buffer_read(struct socket_buffer *buf, char *out, size_t size)
 {
     int i;
@@ -89,12 +109,16 @@ int socket_buffer_read(struct socket_buffer *buf, char *out, size_t size)
     /* Refill the buffer if necessary. */
     if (buf->p >= buf->end) {
         buf->p = buf->buffer;
+        sb_read_timedout = 0;
         do {
             errno = 0;
             i = fdinfo_recv(&buf->fdn, buf->buffer, sizeof(buf->buffer));
         } while (i == -1 && buf->fdn.lasterr == EINTR);
-        if (i <= 0)
+        if (i <= 0) {
+            if (i < 0 && fdinfo_read_would_block(&buf->fdn))
+                sb_read_timedout = 1;
             return i;
+        }
         buf->end = buf->buffer + i;
     }
     i = buf->end - buf->p;
@@ -127,11 +151,14 @@ char *socket_buffer_readline(struct socket_buffer *buf, size_t *n, size_t maxlen
             int i;
 
             buf->p = buf->buffer;
+            sb_read_timedout = 0;
             do {
                 errno = 0;
                 i = fdinfo_recv(&buf->fdn, buf->buffer, sizeof(buf->buffer));
             } while (i == -1 && buf->fdn.lasterr == EINTR);
             if (i <= 0) {
+                if (i < 0 && fdinfo_read_would_block(&buf->fdn))
+                    sb_read_timedout = 1;
                 free(line);
                 return NULL;
             }
@@ -899,7 +926,10 @@ int http_read_header(struct socket_buffer *buf, char **result)
         line = socket_buffer_readline(buf, &count, MAX_HEADER_LENGTH);
         if (line == NULL) {
             free(header);
-            if (count >= MAX_HEADER_LENGTH)
+            if (socket_buffer_read_timedout())
+                /* The client went idle before finishing the header. */
+                return 408;
+            else if (count >= MAX_HEADER_LENGTH)
                 /* Request Entity Too Large. */
                 return 413;
             else
@@ -1067,7 +1097,10 @@ int http_read_request_line(struct socket_buffer *buf, char **line)
         free(*line);
         *line = socket_buffer_readline(buf, &n, MAX_REQUEST_LINE_LENGTH);
         if (*line == NULL) {
-            if (n >= MAX_REQUEST_LINE_LENGTH)
+            if (socket_buffer_read_timedout())
+                /* The client went idle before finishing the Request-Line. */
+                return 408;
+            else if (n >= MAX_REQUEST_LINE_LENGTH)
                 /* Request Entity Too Large. */
                 return 413;
             else

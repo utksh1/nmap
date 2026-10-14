@@ -84,6 +84,10 @@ char *socket_buffer_readline(struct socket_buffer *buf, size_t *n, size_t maxlen
 
 int socket_buffer_readcount(struct socket_buffer *buf, char *out, size_t size);
 
+/* Nonzero if the last socket_buffer_read/socket_buffer_readline failure was
+   caused by the idle timeout (SO_RCVTIMEO) rather than an error or EOF. */
+int socket_buffer_read_timedout(void);
+
 char *socket_buffer_remainder(struct socket_buffer *buf, size_t *len);
 
 /* A broken-down URI as defined in RFC 3986, except that the query and fragment
